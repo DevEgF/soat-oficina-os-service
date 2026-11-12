@@ -1,6 +1,16 @@
 package com.soat.tech.challenge.oficina.os.application.saga
 
 import com.soat.tech.challenge.oficina.os.application.messaging.AfterCommitPublisher
+import com.soat.tech.challenge.oficina.os.application.messaging.CancelQuotePayload
+import com.soat.tech.challenge.oficina.os.application.messaging.PaymentRefundedPayload
+import com.soat.tech.challenge.oficina.os.application.messaging.QuoteCancelledPayload
+import com.soat.tech.challenge.oficina.os.application.messaging.RefundPaymentPayload
+import com.soat.tech.challenge.oficina.os.domain.model.Compensation
+import java.time.Duration
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import com.soat.tech.challenge.oficina.os.application.messaging.ExecutionFailedPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.ExecutionFinishedPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.ExecutionStatusChangedPayload
@@ -209,19 +219,246 @@ class SagaOrchestratorTest {
 		assertEquals(SagaOutcome.DUPLICATE, orchestrator.handle(event))
 	}
 
-	@Test
-	fun `failure events are only logged until the compensations exist`() {
-		val failures = listOf(
-			event(MessageType.QUOTE_GENERATION_FAILED, QuoteGenerationFailedPayload(workOrder.id, "Unknown code X")),
-			event(MessageType.QUOTE_REJECTED, QuoteRejectedPayload(workOrder.id, quoteId, null)),
-			event(MessageType.PAYMENT_REJECTED, PaymentRejectedPayload(workOrder.id, quoteId, paymentId, "card refused")),
-			event(MessageType.EXECUTION_FAILED, ExecutionFailedPayload(workOrder.id, "engine")),
-		)
-		failures.forEach { assertEquals(SagaOutcome.NOT_HANDLED, orchestrator.handle(it)) }
+	// ---- compensations ----
 
-		assertEquals(WorkOrderStatus.RECEIVED, status())
-		assertEquals(0, ports.history.size)
-		assertEquals(4, ports.processed.size)
+	private fun quoteGenerationFailed() =
+		event(MessageType.QUOTE_GENERATION_FAILED, QuoteGenerationFailedPayload(workOrder.id, "Unknown code X"))
+	private fun quoteRejected(id: UUID = quoteId) = event(MessageType.QUOTE_REJECTED, QuoteRejectedPayload(workOrder.id, id, "too expensive"))
+	private fun paymentRejected() =
+		event(MessageType.PAYMENT_REJECTED, PaymentRejectedPayload(workOrder.id, quoteId, paymentId, "cc_rejected_other_reason"))
+	private fun executionFailed(messageId: UUID = UUID.randomUUID()) =
+		event(MessageType.EXECUTION_FAILED, ExecutionFailedPayload(workOrder.id, "engine block cracked"), messageId)
+	private fun quoteCancelled(id: UUID = quoteId) = event(MessageType.QUOTE_CANCELLED, QuoteCancelledPayload(workOrder.id, id))
+	private fun paymentRefunded(id: UUID = paymentId) = event(MessageType.PAYMENT_REFUNDED, PaymentRefundedPayload(workOrder.id, id))
+
+	private fun publishedCommands(): List<OutboundCommand> {
+		val commands = mutableListOf<OutboundCommand>()
+		verify(atLeast = 0) { afterCommit.publishAfterCommit(capture(commands)) }
+		return commands
+	}
+
+	private fun lastChange() = ports.history.last()
+
+	@Test
+	fun `quote generation failure cancels the work order and compensates the saga at once`() {
+		assertEquals(SagaOutcome.APPLIED, orchestrator.handle(quoteGenerationFailed()))
+
+		assertEquals(WorkOrderStatus.CANCELLED, status())
+		assertEquals("QuoteGenerationFailed", ports.workOrders.getValue(workOrder.id).cancellationReason)
+		assertEquals(SagaStatus.COMPENSATED, saga().status)
+		assertEquals(SagaStep.QUOTE_GENERATION, saga().step)
+		assertEquals("Unknown code X", saga().failureReason)
+		assertEquals(WorkOrderStatus.RECEIVED, lastChange().fromStatus)
+		assertEquals(WorkOrderStatus.CANCELLED, lastChange().toStatus)
+		assertEquals("QuoteGenerationFailed", lastChange().reason)
+		assertNotNull(lastChange().messageId)
+		verify(exactly = 0) { afterCommit.publishAfterCommit(any()) }
+	}
+
+	@Test
+	fun `quote rejection cancels the work order without commands`() {
+		orchestrator.handle(quoteGenerated())
+
+		assertEquals(SagaOutcome.APPLIED, orchestrator.handle(quoteRejected()))
+
+		assertEquals(WorkOrderStatus.CANCELLED, status())
+		assertEquals(SagaStatus.COMPENSATED, saga().status)
+		assertEquals(SagaStep.CUSTOMER_APPROVAL, saga().step)
+		assertEquals("too expensive", saga().failureReason)
+		assertEquals("QuoteRejected", lastChange().reason)
+		verify(exactly = 0) { afterCommit.publishAfterCommit(any()) }
+	}
+
+	@Test
+	fun `rejection of another quote or before the quote is discarded`() {
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(quoteRejected()))
+		orchestrator.handle(quoteGenerated())
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(quoteRejected(UUID.randomUUID())))
+
+		assertEquals(WorkOrderStatus.PENDING_APPROVAL, status())
+		assertEquals(SagaStatus.RUNNING, saga().status)
+	}
+
+	@Test
+	fun `payment rejection cancels the work order and asks Billing to cancel the quote`() {
+		orchestrator.handle(quoteGenerated())
+		orchestrator.handle(quoteApproved())
+		clearMocks(afterCommit)
+
+		assertEquals(SagaOutcome.APPLIED, orchestrator.handle(paymentRejected()))
+
+		assertEquals(WorkOrderStatus.CANCELLED, status())
+		assertEquals(SagaStatus.COMPENSATING, saga().status)
+		assertEquals(SagaStep.PAYMENT, saga().step)
+		assertEquals(listOf(Compensation.CANCEL_QUOTE), saga().pendingCompensations)
+		assertEquals(paymentId, saga().paymentId)
+		assertEquals("PaymentRejected", lastChange().reason)
+		val command = publishedCommands().single()
+		assertEquals(MessageType.CANCEL_QUOTE, command.type)
+		assertEquals("corr-123", command.correlationId)
+		assertEquals(CancelQuotePayload(workOrder.id, quoteId, "PaymentRejected"), command.payload)
+
+		assertEquals(SagaOutcome.APPLIED, orchestrator.handle(quoteCancelled()))
+		assertEquals(SagaStatus.COMPENSATED, saga().status)
+		assertTrue(saga().pendingCompensations.isEmpty())
+		assertEquals(3, ports.history.size, "confirmation does not change the work order status")
+	}
+
+	@Test
+	fun `execution failure refunds the payment and cancels the quote from every execution status`() {
+		listOf(null, "IN_DIAGNOSIS", "IN_EXECUTION").forEach { executionStatus ->
+			openWorkOrder()
+			orchestrator.handle(quoteGenerated())
+			orchestrator.handle(quoteApproved())
+			orchestrator.handle(paymentApproved())
+			if (executionStatus != null) orchestrator.handle(executionStatus("IN_DIAGNOSIS"))
+			if (executionStatus == "IN_EXECUTION") orchestrator.handle(executionStatus("IN_EXECUTION"))
+			val from = status()
+			clearMocks(afterCommit)
+
+			assertEquals(SagaOutcome.APPLIED, orchestrator.handle(executionFailed()))
+
+			assertEquals(WorkOrderStatus.CANCELLED, status())
+			assertEquals(from, lastChange().fromStatus)
+			assertEquals("ExecutionFailed", lastChange().reason)
+			assertEquals(SagaStatus.COMPENSATING, saga().status)
+			assertEquals(SagaStep.EXECUTION, saga().step)
+			assertEquals("engine block cracked", saga().failureReason)
+			assertEquals(listOf(Compensation.CANCEL_QUOTE, Compensation.REFUND_PAYMENT), saga().pendingCompensations)
+			val commands = publishedCommands()
+			assertEquals(listOf(MessageType.REFUND_PAYMENT, MessageType.CANCEL_QUOTE), commands.map { it.type })
+			assertEquals(RefundPaymentPayload(workOrder.id, paymentId, "ExecutionFailed"), commands[0].payload)
+			assertEquals(CancelQuotePayload(workOrder.id, quoteId, "ExecutionFailed"), commands[1].payload)
+		}
+	}
+
+	@Test
+	fun `confirmations close the compensation in any order`() {
+		val cancelled: () -> IncomingMessage = { quoteCancelled() }
+		val refunded: () -> IncomingMessage = { paymentRefunded() }
+		listOf(listOf(cancelled, refunded), listOf(refunded, cancelled)).forEach { (first, second) ->
+			openWorkOrder()
+			orchestrator.handle(quoteGenerated())
+			orchestrator.handle(quoteApproved())
+			orchestrator.handle(paymentApproved())
+			orchestrator.handle(executionFailed())
+
+			assertEquals(SagaOutcome.APPLIED, orchestrator.handle(first()))
+			assertEquals(SagaStatus.COMPENSATING, saga().status)
+			assertEquals(1, saga().pendingCompensations.size)
+			// Billing confirms again with a new message id: nothing left to confirm for that step.
+			assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(first()))
+
+			assertEquals(SagaOutcome.APPLIED, orchestrator.handle(second()))
+			assertEquals(SagaStatus.COMPENSATED, saga().status)
+			assertTrue(saga().pendingCompensations.isEmpty())
+			assertEquals(WorkOrderStatus.CANCELLED, status())
+		}
+	}
+
+	@Test
+	fun `duplicate or late execution failure does not compensate twice`() {
+		orchestrator.handle(quoteGenerated())
+		orchestrator.handle(quoteApproved())
+		orchestrator.handle(paymentApproved())
+		val messageId = UUID.randomUUID()
+		orchestrator.handle(executionFailed(messageId))
+		clearMocks(afterCommit)
+
+		assertEquals(SagaOutcome.DUPLICATE, orchestrator.handle(executionFailed(messageId)))
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(executionFailed()))
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(executionStatus("IN_DIAGNOSIS")))
+
+		assertEquals(WorkOrderStatus.CANCELLED, status())
+		assertEquals(SagaStatus.COMPENSATING, saga().status)
+		assertEquals(1, ports.history.count { it.toStatus == WorkOrderStatus.CANCELLED })
+		verify(exactly = 0) { afterCommit.publishAfterCommit(any()) }
+	}
+
+	@Test
+	fun `confirmations that do not match the saga are discarded`() {
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(quoteCancelled()), "saga still running")
+		orchestrator.handle(quoteGenerated())
+		orchestrator.handle(quoteApproved())
+		orchestrator.handle(paymentApproved())
+		orchestrator.handle(executionFailed())
+
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(quoteCancelled(UUID.randomUUID())))
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(paymentRefunded(UUID.randomUUID())))
+		assertEquals(listOf(Compensation.CANCEL_QUOTE, Compensation.REFUND_PAYMENT), saga().pendingCompensations)
+	}
+
+	@Test
+	fun `failure events out of order are discarded`() {
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(paymentRejected()))
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(executionFailed()))
+		orchestrator.handle(quoteGenerated())
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(quoteGenerationFailed()))
+
+		assertEquals(WorkOrderStatus.PENDING_APPROVAL, status())
+		assertEquals(SagaStatus.RUNNING, saga().status)
+		verify(exactly = 0) { afterCommit.publishAfterCommit(any()) }
+	}
+
+	@Test
+	fun `execution failure after the work order is finalized is discarded`() {
+		orchestrator.handle(quoteGenerated())
+		orchestrator.handle(quoteApproved())
+		orchestrator.handle(paymentApproved())
+		orchestrator.handle(executionStatus("IN_DIAGNOSIS"))
+		orchestrator.handle(executionStatus("IN_EXECUTION"))
+		orchestrator.handle(executionFinished())
+
+		assertEquals(SagaOutcome.DISCARDED, orchestrator.handle(executionFailed()))
+		assertEquals(WorkOrderStatus.FINALIZED, status())
+	}
+
+	// ---- approval deadline ----
+
+	private val deadline = Duration.ofMinutes(30)
+
+	private fun orchestratorAt(instant: Instant) = SagaOrchestrator(
+		workOrders = ports.workOrderRepository,
+		sagas = ports.sagaRepository,
+		history = ports.historyRepository,
+		processedMessages = ports.processedRepository,
+		customers = ports.customerRepository,
+		vehicles = ports.vehicleRepository,
+		afterCommit = afterCommit,
+		clock = Clock.fixed(instant, ZoneOffset.UTC),
+	)
+
+	@Test
+	fun `approval deadline cancels the work order and asks Billing to cancel the quote`() {
+		orchestrator.handle(quoteGenerated())
+		val later = orchestratorAt(now.plus(deadline).plusSeconds(1))
+
+		assertTrue(later.expireApproval(workOrder.id, deadline))
+
+		assertEquals(WorkOrderStatus.CANCELLED, status())
+		assertEquals("ApprovalTimeout", ports.workOrders.getValue(workOrder.id).cancellationReason)
+		assertEquals(SagaStatus.COMPENSATING, saga().status)
+		assertEquals("Quote not approved within PT30M", saga().failureReason)
+		assertEquals("ApprovalTimeout", lastChange().reason)
+		assertNull(lastChange().messageId)
+		assertEquals(CancelQuotePayload(workOrder.id, quoteId, "ApprovalTimeout"), publishedCommands().single().payload)
+
+		// The customer's approval that arrives afterwards is out of order.
+		assertEquals(SagaOutcome.DISCARDED, later.handle(quoteApproved()))
+		assertEquals(WorkOrderStatus.CANCELLED, status())
+		assertEquals(SagaOutcome.APPLIED, later.handle(quoteCancelled()))
+		assertEquals(SagaStatus.COMPENSATED, saga().status)
+	}
+
+	@Test
+	fun `approval deadline leaves alone what is not overdue anymore`() {
+		orchestrator.handle(quoteGenerated())
+
+		assertFalse(orchestratorAt(now.plus(deadline)).expireApproval(workOrder.id, deadline), "deadline not passed")
+		orchestrator.handle(quoteApproved())
+		assertFalse(orchestratorAt(now.plus(Duration.ofDays(1))).expireApproval(workOrder.id, deadline), "already approved")
+		assertFalse(orchestrator.expireApproval(UUID.randomUUID(), deadline), "unknown work order")
+		assertEquals(WorkOrderStatus.AWAITING_PAYMENT, status())
 	}
 
 	@Test

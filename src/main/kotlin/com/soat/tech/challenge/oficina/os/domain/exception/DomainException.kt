@@ -10,3 +10,8 @@ class InvalidStatusTransitionException(
 	val currentStatus: String,
 	val action: String,
 ) : DomainException("Invalid transition: status=$currentStatus, action=$action")
+
+class InvalidSagaStateException(
+	val sagaStatus: String,
+	val action: String,
+) : DomainException("Invalid saga state: status=$sagaStatus, action=$action")

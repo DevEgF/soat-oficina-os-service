@@ -25,11 +25,17 @@ interface VehicleRepository {
 interface WorkOrderRepository {
 	fun save(workOrder: WorkOrder): WorkOrder
 	fun findById(id: UUID): WorkOrder?
+
+	/** Ids of work orders in PENDING_APPROVAL since before [quotedBefore], oldest first, at most [limit]. */
+	fun findAwaitingApprovalSince(quotedBefore: Instant, limit: Int): List<UUID>
 }
 
 interface WorkOrderSagaRepository {
 	fun save(saga: WorkOrderSaga): WorkOrderSaga
 	fun findById(id: UUID): WorkOrderSaga?
+
+	/** Loads the saga holding a row lock until the transaction ends (one change of a saga at a time). */
+	fun findByIdForUpdate(id: UUID): WorkOrderSaga?
 }
 
 interface StatusHistoryRepository {
