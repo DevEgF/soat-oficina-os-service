@@ -57,7 +57,13 @@ fun WorkOrderDetails.toResponse(): WorkOrderResponse = WorkOrderResponse(
 	servicesTotalCents = workOrder.servicesTotalCents,
 	partsTotalCents = workOrder.partsTotalCents,
 	totalCents = workOrder.totalCents,
-	saga = SagaResponse(status = saga.status.name, step = saga.step.name),
+	cancellationReason = workOrder.cancellationReason,
+	saga = SagaResponse(
+		status = saga.status.name,
+		step = saga.step.name,
+		failureReason = saga.failureReason,
+		pendingCompensations = saga.pendingCompensations.map { it.name },
+	),
 	createdAt = workOrder.createdAt,
 	updatedAt = workOrder.updatedAt,
 )

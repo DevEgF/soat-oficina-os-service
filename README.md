@@ -4,8 +4,9 @@ Serviço de **Ordens de Serviço (OS)** da oficina mecânica — Tech Challenge 
 É um dos três microsserviços que substituem o monólito `soat-oficina-app`; os outros são
 `soat-oficina-billing-service` e `soat-oficina-execution-service`. Abre a OS, guarda clientes,
 veículos e o histórico de status, emite o JWT de staff que vale nos três serviços e **orquestra a
-saga** entre eles por RabbitMQ. Está implementado o caminho feliz; as compensações (eventos de
-falha) ainda não são tratadas e, por enquanto, só geram log `WARN`.
+saga** entre eles por RabbitMQ: o caminho feliz, da abertura à entrega, e as compensações
+(falha de um participante ou prazo de aprovação vencido cancelam a OS e desfazem o que o Billing
+já fez).
 
 ## Stack
 
@@ -48,14 +49,21 @@ token ou credencial errada, 404 OS inexistente, 409 regra de negócio ou transi�
 |---|---|
 | `POST /api/public/auth/login` | Público. `{ "username", "password" }` → `{ "accessToken", "expiresInSeconds" }`. Usuários `admin` (`ADMIN`), `atendente` (`ATTENDANT`) e `tecnico` (`TECHNICIAN`) |
 | `POST /api/work-orders` | Abre a OS (`RECEIVED`), cria a saga e publica `GenerateQuote`. Cliente achado por `taxId` e veículo por placa, criados se não existirem; veículo de outro cliente é 409. Pelo menos um item em `services` ou `parts`; só `code` e `quantity` (catálogo e preço são do Billing). 201 |
-| `GET /api/work-orders/{id}` | OS com cliente, veículo, itens, `quoteId`, `paymentId`, totais em centavos e `saga { status, step }`; o que ainda não chegou vem `null` |
-| `GET /api/work-orders/{id}/history` | Mudanças de status em ordem cronológica: `fromStatus`, `toStatus`, `reason` (type do evento, `WorkOrderOpened` ou `DeliveryRegistered`), `occurredAt` |
+| `GET /api/work-orders/{id}` | OS com cliente, veículo, itens, `quoteId`, `paymentId`, totais em centavos, `cancellationReason` e `saga { status, step, failureReason, pendingCompensations }`; o que ainda não chegou vem `null` (e `pendingCompensations`, `[]`) |
+| `GET /api/work-orders/{id}/history` | Mudanças de status em ordem cronológica: `fromStatus`, `toStatus`, `reason` (type do evento, `WorkOrderOpened`, `DeliveryRegistered` ou `ApprovalTimeout`), `occurredAt` |
 | `POST /api/work-orders/{id}/delivery` | Só a partir de `FINALIZED`: leva a `DELIVERED` e conclui a saga (`COMPLETED`) |
 
 Status da OS: `RECEIVED` (Recebida), `PENDING_APPROVAL` (Aguardando Aprovação), `AWAITING_PAYMENT`
 (Aguardando Pagamento), `QUEUED` (Na Fila), `IN_DIAGNOSIS` (Diagnóstico), `IN_EXECUTION` (Execução),
 `FINALIZED` (Finalizada), `DELIVERED` (Entregue), `CANCELLED` (Cancelada). Passos da saga:
 `QUOTE_GENERATION`, `CUSTOMER_APPROVAL`, `PAYMENT`, `EXECUTION`, `DELIVERY`.
+
+Campos da OS cancelada: `cancellationReason` é o tipo do gatilho (`QuoteGenerationFailed`,
+`QuoteRejected`, `PaymentRejected`, `ExecutionFailed` ou `ApprovalTimeout`, o mesmo `reason` do
+histórico); `saga.failureReason` é o texto do `reason` enviado pelo participante (no prazo vencido,
+`Quote not approved within <prazo>`); `saga.pendingCompensations` lista o que o Billing ainda não
+confirmou (`CANCEL_QUOTE`, `REFUND_PAYMENT`). Status da saga: `RUNNING`, `COMPLETED` (entregue),
+`COMPENSATING` (esperando confirmação) e `COMPENSATED`; o `step` fica onde a saga parou.
 
 ## Mensagens
 
@@ -74,6 +82,11 @@ Envelope JSON (sem `__TypeId__`): `messageId`, `sagaId` (id da OS), `type`, `occ
 | `GenerateQuote` → `command.billing.generate-quote` | OS aberta |
 | `RequestPayment` → `command.billing.request-payment` | `QuoteApproved` |
 | `StartExecution` → `command.execution.start-execution` | `PaymentApproved` |
+| `CancelQuote` → `command.billing.cancel-quote` | `PaymentRejected`, `ExecutionFailed` ou prazo de aprovação vencido |
+| `RefundPayment` → `command.billing.refund-payment` | `ExecutionFailed` (publicado antes do `CancelQuote`) |
+
+`reason` dos comandos de compensação: o tipo do gatilho (`PaymentRejected`, `ExecutionFailed` ou
+`ApprovalTimeout`).
 
 | Consome de `os.events` | Efeito na OS |
 |---|---|
@@ -82,13 +95,25 @@ Envelope JSON (sem `__TypeId__`): `messageId`, `sagaId` (id da OS), `type`, `occ
 | `PaymentApproved` | `QUEUED`; guarda `paymentId` |
 | `ExecutionStatusChanged` | `IN_DIAGNOSIS` ou `IN_EXECUTION` |
 | `ExecutionFinished` | `FINALIZED` |
-| `QuoteGenerationFailed`, `QuoteRejected`, `QuoteCancelled`, `PaymentRejected`, `PaymentRefunded`, `ExecutionFailed` | Nada ainda: log `WARN` e ack (compensações ainda não implementadas) |
+| `QuoteGenerationFailed` (de `RECEIVED`) | `CANCELLED`; saga `COMPENSATED` (nada a desfazer) |
+| `QuoteRejected` (de `PENDING_APPROVAL`) | `CANCELLED`; saga `COMPENSATED` |
+| `PaymentRejected` (de `AWAITING_PAYMENT`) | `CANCELLED`; publica `CancelQuote`; saga `COMPENSATING` |
+| `ExecutionFailed` (de `QUEUED`, `IN_DIAGNOSIS` ou `IN_EXECUTION`) | `CANCELLED`; publica `RefundPayment` e `CancelQuote`; saga `COMPENSATING` |
+| `QuoteCancelled` / `PaymentRefunded` | Saga `COMPENSATING`: baixa a pendência; sem pendência, `COMPENSATED` (em qualquer ordem) |
+
+**Prazo de aprovação:** a cada `APP_SAGA_APPROVAL_CHECK_INTERVAL` (padrão `PT30S`) o serviço
+cancela as OS que estão em `PENDING_APPROVAL` há mais que `APP_SAGA_APPROVAL_TIMEOUT` (padrão
+`PT24H`; `PT30M` no kind), contado da entrada no status, e publica `CancelQuote`. Cada OS é
+cancelada na sua própria transação; um erro em uma não impede as outras.
 
 O orquestrador (`SagaOrchestrator`) grava OS, saga (`saga_os`), histórico (`os_historico`) e o
 `messageId` (`processed_message`) na mesma transação; mensagem repetida é ignorada com ack, e
 evento que não se aplica ao status atual é descartado com log `WARN`. Falha no processamento tem
 3 tentativas (500 ms, depois 1 s) e vai para `os.events.dlq`; JSON inválido, `type` fora do
-contrato ou payload inválido vão direto para a DLQ.
+contrato ou payload inválido vão direto para a DLQ. Evento que chega depois do cancelamento (por
+exemplo `QuoteApproved` depois do prazo vencido, ou `ExecutionFailed` repetido com outro
+`messageId`) é descartado com `WARN`. A linha da saga é travada (`SELECT ... FOR UPDATE`) enquanto
+um evento ou o prazo é aplicado, então as duas confirmações nunca se sobrescrevem.
 
 ## Testes
 
@@ -100,7 +125,10 @@ Roda os testes unitários (domínio, orquestrador, envelope) e os de integraçã
 contra PostgreSQL e RabbitMQ reais, via Testcontainers; precisa do Docker). O
 `SagaFlowIntegrationTest` simula o Billing e o Execution publicando os eventos no exchange `oficina`
 e lendo os comandos de filas de teste: leva uma OS de `RECEIVED` a `DELIVERED` e confere o
-histórico, a idempotência, a DLQ e o retry. Gera o JaCoCo em
+histórico, a idempotência, a DLQ e o retry. O `SagaCompensationIntegrationTest` cobre cada
+compensação, com as confirmações nas duas ordens e eventos repetidos ou fora de ordem, e o
+`ApprovalTimeoutIntegrationTest` roda com prazo de 2 s (contexto próprio) para ver o cancelamento
+por prazo. Gera o JaCoCo em
 `build/reports/jacoco/test/` (XML e HTML) e falha se a cobertura de linhas do serviço inteiro
 ficar abaixo de 80%. Só a classe principal fica fora da conta (a mesma exclusão vai para o Sonar).
 
@@ -142,6 +170,8 @@ depois de um `CI` verde de push na `main`.
 | `APP_JWT_SECRET` | Secret | obrigatório (perfil `local`: segredo de desenvolvimento) |
 | `APP_JWT_EXPIRATION_MINUTES` | ConfigMap (`60`) | `60` |
 | `APP_SECURITY_ADMIN_PASSWORD` / `_ATTENDANT_` / `_TECHNICIAN_` | Secret | obrigatórias (perfil `local`: igual ao nome do usuário) |
+| `APP_SAGA_APPROVAL_TIMEOUT` | ConfigMap (`PT30M`) | `PT24H` |
+| `APP_SAGA_APPROVAL_CHECK_INTERVAL` | — | `PT30S` |
 | `SPRING_DATASOURCE_URL` | ConfigMap (`jdbc:postgresql://os-postgres:5432/os`) | `jdbc:postgresql://localhost:5433/os` |
 | `SPRING_DATASOURCE_USERNAME` | ConfigMap (`os`) | `os` |
 | `SPRING_DATASOURCE_PASSWORD` | Secret | `oficina` |

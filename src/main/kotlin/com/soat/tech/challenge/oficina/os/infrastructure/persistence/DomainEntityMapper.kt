@@ -1,5 +1,6 @@
 package com.soat.tech.challenge.oficina.os.infrastructure.persistence
 
+import com.soat.tech.challenge.oficina.os.domain.model.Compensation
 import com.soat.tech.challenge.oficina.os.domain.model.Customer
 import com.soat.tech.challenge.oficina.os.domain.model.LicensePlate
 import com.soat.tech.challenge.oficina.os.domain.model.PartLine
@@ -69,6 +70,7 @@ fun WorkOrderEntity.toDomain(): WorkOrder = WorkOrder(
 	finishedAt = finishedAt,
 	deliveredAt = deliveredAt,
 	cancelledAt = cancelledAt,
+	cancellationReason = cancellationReason,
 )
 
 /** Copies the aggregate onto a new or managed entity; lines are immutable after opening. */
@@ -91,6 +93,7 @@ fun WorkOrder.copyTo(entity: WorkOrderEntity): WorkOrderEntity = entity.also { e
 	e.finishedAt = finishedAt
 	e.deliveredAt = deliveredAt
 	e.cancelledAt = cancelledAt
+	e.cancellationReason = cancellationReason
 	if (e.serviceLines.isEmpty() && e.partLines.isEmpty()) {
 		e.serviceLines.addAll(serviceLines.map { WorkOrderLineEmbeddable(it.code, it.quantity) })
 		e.partLines.addAll(partLines.map { WorkOrderLineEmbeddable(it.code, it.quantity) })
@@ -106,6 +109,11 @@ fun WorkOrderSagaEntity.toDomain(): WorkOrderSaga = WorkOrderSaga(
 	correlationId = correlationId,
 	createdAt = createdAt,
 	updatedAt = updatedAt,
+	failureReason = failureReason,
+	pendingCompensations = buildSet {
+		if (pendingQuoteCancellation) add(Compensation.CANCEL_QUOTE)
+		if (pendingPaymentRefund) add(Compensation.REFUND_PAYMENT)
+	},
 )
 
 fun WorkOrderSaga.toEntity(): WorkOrderSagaEntity = WorkOrderSagaEntity(
@@ -117,6 +125,9 @@ fun WorkOrderSaga.toEntity(): WorkOrderSagaEntity = WorkOrderSagaEntity(
 	correlationId = correlationId,
 	createdAt = createdAt,
 	updatedAt = updatedAt,
+	failureReason = failureReason,
+	pendingQuoteCancellation = Compensation.CANCEL_QUOTE in pendingCompensations,
+	pendingPaymentRefund = Compensation.REFUND_PAYMENT in pendingCompensations,
 )
 
 fun StatusHistoryEntity.toDomain(): StatusChange = StatusChange(

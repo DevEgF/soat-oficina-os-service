@@ -15,7 +15,7 @@ import jakarta.persistence.Table
 import jakarta.persistence.Version
 import java.time.Instant
 
-// JPA mapping of V1__init.sql. Associations are plain id columns (foreign keys live in the schema).
+// JPA mapping of the Flyway schema (db/migration). Associations are plain id columns (foreign keys live in the schema).
 
 @Entity
 @Table(name = "clientes")
@@ -100,6 +100,8 @@ class WorkOrderEntity(
 	var deliveredAt: Instant? = null,
 	@Column(name = "cancelada_em")
 	var cancelledAt: Instant? = null,
+	@Column(length = 64, name = "motivo_cancelamento")
+	var cancellationReason: String? = null,
 	@Version
 	@Column(name = "versao")
 	var version: Long? = null,
@@ -133,6 +135,12 @@ class WorkOrderSagaEntity(
 	var createdAt: Instant = Instant.EPOCH,
 	@Column(nullable = false, name = "atualizado_em")
 	var updatedAt: Instant = Instant.EPOCH,
+	@Column(length = 500, name = "motivo_falha")
+	var failureReason: String? = null,
+	@Column(nullable = false, name = "pendente_cancelar_orcamento")
+	var pendingQuoteCancellation: Boolean = false,
+	@Column(nullable = false, name = "pendente_estornar_pagamento")
+	var pendingPaymentRefund: Boolean = false,
 )
 
 @Entity

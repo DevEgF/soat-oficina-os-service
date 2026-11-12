@@ -85,7 +85,7 @@ data class ExecutionFinishedPayload(val workOrderId: UUID, val finishedAt: Insta
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class ExecutionFailedPayload(val workOrderId: UUID, val reason: String)
 
-/** Free text describing why a failure event happened (logged until compensations exist). */
+/** Free text a participant sent with a failure event (kept in the saga as its failure reason). */
 fun Any.failureReason(): String? = when (this) {
 	is QuoteGenerationFailedPayload -> reason
 	is QuoteRejectedPayload -> reason

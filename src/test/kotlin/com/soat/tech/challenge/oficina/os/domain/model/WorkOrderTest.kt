@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import kotlin.test.assertEquals
@@ -127,26 +128,80 @@ class WorkOrderTest {
 	@DisplayName("Given a cancellation (compensation)")
 	inner class GivenCancellation {
 
-		@Test
-		fun `when cancelled before execution ends then it is CANCELLED`() {
-			val wo = newWorkOrder()
-			wo.registerQuote(1, 1, 2, t0)
-			wo.cancel(t0.plusSeconds(1))
-			assertEquals(WorkOrderStatus.CANCELLED, wo.status)
-			assertEquals(t0.plusSeconds(1), wo.cancelledAt)
+		/** Work order moved to [status] through the regular transitions. */
+		private fun workOrderIn(status: WorkOrderStatus): WorkOrder = newWorkOrder().apply {
+			val path = listOf<WorkOrder.() -> Unit>(
+				{ registerQuote(1, 1, 2, t0) }, { approveQuote(t0) }, { confirmPayment(t0) },
+				{ startDiagnosis(t0) }, { startRepair(t0) }, { finish(t0) }, { registerDelivery(t0) },
+			)
+			val order = WorkOrderStatus.entries.takeWhile { it != WorkOrderStatus.CANCELLED }
+			path.take(order.indexOf(status)).forEach { it() }
+			check(this.status == status)
+		}
+
+		@ParameterizedTest
+		@EnumSource(CancellationCause::class)
+		fun `when the cause applies to the status then it is CANCELLED with the cause as reason`(cause: CancellationCause) {
+			cause.allowedFrom.forEach { from ->
+				val wo = workOrderIn(from)
+				wo.cancel(cause, t0.plusSeconds(1))
+				assertEquals(WorkOrderStatus.CANCELLED, wo.status)
+				assertEquals(t0.plusSeconds(1), wo.cancelledAt)
+				assertEquals(t0.plusSeconds(1), wo.updatedAt)
+				assertEquals(cause.reason, wo.cancellationReason)
+			}
+		}
+
+		@ParameterizedTest
+		@EnumSource(CancellationCause::class)
+		fun `when the cause does not apply to the status then cancel is refused`(cause: CancellationCause) {
+			val others = WorkOrderStatus.entries.filter { it !in cause.allowedFrom && it != WorkOrderStatus.CANCELLED }
+			others.forEach { from ->
+				val wo = workOrderIn(from)
+				assertFailsWith<InvalidStatusTransitionException> { wo.cancel(cause, t0) }
+				assertEquals(from, wo.status)
+				assertNull(wo.cancellationReason)
+			}
+			val cancelled = workOrderIn(cause.allowedFrom.first()).apply { cancel(cause, t0) }
+			assertFailsWith<InvalidStatusTransitionException> { cancelled.cancel(cause, t0) }
 		}
 
 		@Test
-		fun `when already finalized delivered or cancelled then cancel is refused`() {
-			val finalized = newWorkOrder().apply {
-				registerQuote(1, 1, 2, t0); approveQuote(t0); confirmPayment(t0)
-				startDiagnosis(t0); startRepair(t0); finish(t0)
-			}
-			assertFailsWith<InvalidStatusTransitionException> { finalized.cancel(t0) }
-			finalized.registerDelivery(t0)
-			assertFailsWith<InvalidStatusTransitionException> { finalized.cancel(t0) }
-			val cancelled = newWorkOrder().apply { cancel(t0) }
-			assertFailsWith<InvalidStatusTransitionException> { cancelled.cancel(t0) }
+		fun `cancellation reasons and compensations follow the contract`() {
+			assertEquals(
+				listOf("QuoteGenerationFailed", "QuoteRejected", "ApprovalTimeout", "PaymentRejected", "ExecutionFailed"),
+				CancellationCause.entries.map { it.reason },
+			)
+			assertEquals(listOf(Compensation.CANCEL_QUOTE), CancellationCause.APPROVAL_TIMEOUT.compensations)
+			assertEquals(listOf(Compensation.CANCEL_QUOTE), CancellationCause.PAYMENT_REJECTED.compensations)
+			assertEquals(
+				listOf(Compensation.REFUND_PAYMENT, Compensation.CANCEL_QUOTE),
+				CancellationCause.EXECUTION_FAILED.compensations,
+			)
+			assertTrue(CancellationCause.QUOTE_GENERATION_FAILED.compensations.isEmpty())
+			assertTrue(CancellationCause.QUOTE_REJECTED.compensations.isEmpty())
+		}
+	}
+
+	@Nested
+	@DisplayName("Given the approval deadline")
+	inner class GivenApprovalDeadline {
+
+		private val deadline = Duration.ofMinutes(30)
+
+		@Test
+		fun `when pending approval longer than the deadline then it is overdue`() {
+			val wo = newWorkOrder().apply { registerQuote(1, 1, 2, t0) }
+			assertFalse(wo.approvalOverdue(deadline, t0.plus(deadline)))
+			assertTrue(wo.approvalOverdue(deadline, t0.plus(deadline).plusMillis(1)))
+		}
+
+		@Test
+		fun `when not pending approval then it is never overdue`() {
+			val later = t0.plus(Duration.ofDays(2))
+			assertFalse(newWorkOrder().approvalOverdue(deadline, later))
+			val approved = newWorkOrder().apply { registerQuote(1, 1, 2, t0); approveQuote(t0) }
+			assertFalse(approved.approvalOverdue(deadline, later))
 		}
 	}
 

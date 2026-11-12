@@ -1,13 +1,17 @@
 package com.soat.tech.challenge.oficina.os.application.saga
 
+import com.soat.tech.challenge.oficina.os.application.messaging.CancelQuotePayload
 import com.soat.tech.challenge.oficina.os.application.messaging.CustomerPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.GenerateQuotePayload
 import com.soat.tech.challenge.oficina.os.application.messaging.ItemPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.MessageType
 import com.soat.tech.challenge.oficina.os.application.messaging.OutboundCommand
+import com.soat.tech.challenge.oficina.os.application.messaging.RefundPaymentPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.RequestPaymentPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.StartExecutionPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.VehiclePayload
+import com.soat.tech.challenge.oficina.os.domain.model.CancellationCause
+import com.soat.tech.challenge.oficina.os.domain.model.Compensation
 import com.soat.tech.challenge.oficina.os.domain.model.Customer
 import com.soat.tech.challenge.oficina.os.domain.model.Vehicle
 import com.soat.tech.challenge.oficina.os.domain.model.WorkOrder
@@ -55,4 +59,29 @@ object SagaCommands {
 			parts = workOrder.partLines.map { ItemPayload(it.code, it.quantity) },
 		),
 	)
+
+	/** Command that undoes [compensation]; the reason is the type of the trigger of the cancellation. */
+	fun compensate(compensation: Compensation, saga: WorkOrderSaga, cause: CancellationCause): OutboundCommand =
+		when (compensation) {
+			Compensation.CANCEL_QUOTE -> OutboundCommand(
+				sagaId = saga.id,
+				type = MessageType.CANCEL_QUOTE,
+				correlationId = saga.correlationId,
+				payload = CancelQuotePayload(
+					workOrderId = saga.id,
+					quoteId = requireNotNull(saga.quoteId) { "Saga ${saga.id} has no quote to cancel" },
+					reason = cause.reason,
+				),
+			)
+			Compensation.REFUND_PAYMENT -> OutboundCommand(
+				sagaId = saga.id,
+				type = MessageType.REFUND_PAYMENT,
+				correlationId = saga.correlationId,
+				payload = RefundPaymentPayload(
+					workOrderId = saga.id,
+					paymentId = requireNotNull(saga.paymentId) { "Saga ${saga.id} has no payment to refund" },
+					reason = cause.reason,
+				),
+			)
+		}
 }

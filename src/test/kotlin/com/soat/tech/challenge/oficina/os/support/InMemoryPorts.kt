@@ -7,6 +7,7 @@ import com.soat.tech.challenge.oficina.os.domain.model.TaxDocument
 import com.soat.tech.challenge.oficina.os.domain.model.Vehicle
 import com.soat.tech.challenge.oficina.os.domain.model.WorkOrder
 import com.soat.tech.challenge.oficina.os.domain.model.WorkOrderSaga
+import com.soat.tech.challenge.oficina.os.domain.model.WorkOrderStatus
 import com.soat.tech.challenge.oficina.os.domain.port.CustomerRepository
 import com.soat.tech.challenge.oficina.os.domain.port.ProcessedMessageRepository
 import com.soat.tech.challenge.oficina.os.domain.port.StatusHistoryRepository
@@ -40,11 +41,17 @@ class InMemoryPorts {
 	val workOrderRepository = object : WorkOrderRepository {
 		override fun save(workOrder: WorkOrder) = workOrder.also { workOrders[it.id] = it }
 		override fun findById(id: UUID) = workOrders[id]
+		override fun findAwaitingApprovalSince(quotedBefore: Instant, limit: Int) = workOrders.values
+			.filter { it.status == WorkOrderStatus.PENDING_APPROVAL && it.quotedAt?.isBefore(quotedBefore) == true }
+			.sortedBy { it.quotedAt }
+			.take(limit)
+			.map { it.id }
 	}
 
 	val sagaRepository = object : WorkOrderSagaRepository {
 		override fun save(saga: WorkOrderSaga) = saga.also { sagas[it.id] = it }
 		override fun findById(id: UUID) = sagas[id]
+		override fun findByIdForUpdate(id: UUID) = sagas[id]
 	}
 
 	val historyRepository = object : StatusHistoryRepository {
