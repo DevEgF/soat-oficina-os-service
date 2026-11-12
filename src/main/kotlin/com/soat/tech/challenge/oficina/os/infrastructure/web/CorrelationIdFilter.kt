@@ -50,12 +50,13 @@ class CorrelationIdFilter(
         }
     }
 
-    private companion object {
-        const val CORRELATION_ID_HEADER = "X-Correlation-Id"
+    companion object {
+        /** MDC key of the correlation id; the message consumers reuse it. */
         const val REQUEST_ID_KEY = "requestId"
-        const val ENVIRONMENT_KEY = "environment"
-        const val SERVICE_KEY = "service"
-        val SAFE_CORRELATION_ID = Regex("[A-Za-z0-9._=-]{1,64}")
-        val log = LoggerFactory.getLogger(CorrelationIdFilter::class.java)
+        private const val CORRELATION_ID_HEADER = "X-Correlation-Id"
+        private const val ENVIRONMENT_KEY = "environment"
+        private const val SERVICE_KEY = "service"
+        private val SAFE_CORRELATION_ID = Regex("[A-Za-z0-9._=-]{1,64}")
+        private val log = LoggerFactory.getLogger(CorrelationIdFilter::class.java)
     }
 }

@@ -1,46 +1,12 @@
 package com.soat.tech.challenge.oficina.os.integration
 
-import com.fasterxml.jackson.databind.JsonNode
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.soat.tech.challenge.oficina.os.support.TestJwt
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.boot.test.context.SpringBootTest.WebEnvironment
-import org.springframework.boot.test.web.server.LocalServerPort
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection
-import org.springframework.test.context.ActiveProfiles
-import org.testcontainers.junit.jupiter.Container
-import org.testcontainers.junit.jupiter.Testcontainers
-import org.testcontainers.postgresql.PostgreSQLContainer
-import org.testcontainers.rabbitmq.RabbitMQContainer
-import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 
-/**
- * Full context against real PostgreSQL and RabbitMQ containers.
- * Properties are inlined so they win over APP_* variables exported in the developer shell.
- */
-@SpringBootTest(
-    webEnvironment = WebEnvironment.RANDOM_PORT,
-    properties = [
-        "app.environment=hml",
-        "app.jwt.secret=${TestJwt.RAW_SECRET}",
-    ],
-)
-@ActiveProfiles("test")
-@Testcontainers
-class OsServiceIntegrationTest {
-
-    @LocalServerPort
-    private var port: Int = 0
-
-    private val http: HttpClient = HttpClient.newHttpClient()
-    private val json = ObjectMapper()
+class OsServiceIntegrationTest : IntegrationTestSupport() {
 
     @Test
     fun `health is UP with database and broker in readiness`() {
@@ -75,11 +41,19 @@ class OsServiceIntegrationTest {
     }
 
     @Test
-    fun `openapi document is public`() {
+    fun `openapi document is public and lists the new routes`() {
         val response = get("/v3/api-docs")
 
         assertEquals(200, response.statusCode())
-        assertTrue(body(response)["paths"].has("/api/info"))
+        val paths = body(response)["paths"]
+        listOf(
+            "/api/info",
+            "/api/public/auth/login",
+            "/api/work-orders",
+            "/api/work-orders/{id}",
+            "/api/work-orders/{id}/history",
+            "/api/work-orders/{id}/delivery",
+        ).forEach { assertTrue(paths.has(it), it) }
     }
 
     @Test
@@ -88,23 +62,22 @@ class OsServiceIntegrationTest {
         assertEquals(403, get("/internal", TestJwt.token()).statusCode())
     }
 
-    private fun get(path: String, token: String? = null): HttpResponse<String> {
-        val request = HttpRequest.newBuilder(URI.create("http://localhost:$port$path")).GET()
-        token?.let { request.header("Authorization", "Bearer $it") }
-        return http.send(request.build(), HttpResponse.BodyHandlers.ofString())
+    @Test
+    fun `staff login issues a token accepted by the api`() {
+        val response = post("/api/public/auth/login", """{"username":"tecnico","password":"tecnico"}""")
+
+        assertEquals(200, response.statusCode())
+        val login = body(response)
+        assertEquals(3600, login["expiresInSeconds"].asLong())
+        assertEquals(setOf("accessToken", "expiresInSeconds"), login.fieldNames().asSequence().toSet())
+        assertEquals(200, get("/api/info", login["accessToken"].asText()).statusCode())
     }
 
-    private fun body(response: HttpResponse<String>): JsonNode = json.readTree(response.body())
-
-    companion object {
-        @Container
-        @ServiceConnection
-        @JvmStatic
-        val postgres = PostgreSQLContainer("postgres:16.15-alpine")
-
-        @Container
-        @ServiceConnection
-        @JvmStatic
-        val rabbit = RabbitMQContainer("rabbitmq:4.2.9-alpine")
+    @Test
+    fun `staff login rejects wrong credentials and invalid bodies`() {
+        assertEquals(401, post("/api/public/auth/login", """{"username":"admin","password":"wrong"}""").statusCode())
+        assertEquals(401, post("/api/public/auth/login", """{"username":"ghost","password":"ghost"}""").statusCode())
+        assertEquals(400, post("/api/public/auth/login", """{"username":"","password":""}""").statusCode())
+        assertEquals(400, post("/api/public/auth/login", "not json").statusCode())
     }
 }
