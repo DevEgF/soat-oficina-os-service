@@ -34,6 +34,8 @@ dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-amqp")
 	implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.0")
 	implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+	// Jackson 3 (tools.jackson) is what Spring MVC and the message envelope use in Boot 4.
+	implementation("tools.jackson.module:jackson-module-kotlin")
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
 
 	// Persistence (PostgreSQL). The Execution service swaps this block for spring-boot-starter-data-mongodb.
@@ -55,7 +57,8 @@ dependencies {
 
 kotlin {
 	compilerOptions {
-		freeCompilerArgs.addAll("-Xjsr305=strict")
+		// Type-use annotations (List<@Valid T>) are emitted so Bean Validation cascades into list elements.
+		freeCompilerArgs.addAll("-Xjsr305=strict", "-Xemit-jvm-type-annotations")
 	}
 }
 

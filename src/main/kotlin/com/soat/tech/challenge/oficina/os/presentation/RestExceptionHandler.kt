@@ -2,6 +2,8 @@ package com.soat.tech.challenge.oficina.os.presentation
 
 import com.soat.tech.challenge.oficina.os.domain.exception.BusinessRuleException
 import com.soat.tech.challenge.oficina.os.domain.exception.DomainException
+import com.soat.tech.challenge.oficina.os.domain.exception.InvalidLicensePlateException
+import com.soat.tech.challenge.oficina.os.domain.exception.InvalidTaxDocumentException
 import com.soat.tech.challenge.oficina.os.domain.exception.NotFoundException
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
@@ -29,6 +31,10 @@ class RestExceptionHandler : ResponseEntityExceptionHandler() {
 
     @ExceptionHandler(IllegalArgumentException::class)
     fun badRequest(e: IllegalArgumentException) =
+        response(HttpStatus.BAD_REQUEST, e.message ?: "Bad request")
+
+    @ExceptionHandler(InvalidTaxDocumentException::class, InvalidLicensePlateException::class)
+    fun invalidDocument(e: DomainException) =
         response(HttpStatus.BAD_REQUEST, e.message ?: "Bad request")
 
     @ExceptionHandler(BusinessRuleException::class, DomainException::class)

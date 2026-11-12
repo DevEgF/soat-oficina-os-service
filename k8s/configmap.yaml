@@ -8,6 +8,8 @@ metadata:
 data:
   SERVER_PORT: "8080"
   APP_ENVIRONMENT: "hml"
+  # Validade do token emitido no login de staff.
+  APP_JWT_EXPIRATION_MINUTES: "60"
   SPRING_DATASOURCE_URL: "jdbc:postgresql://os-postgres:5432/os"
   SPRING_DATASOURCE_USERNAME: "os"
   SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "4"

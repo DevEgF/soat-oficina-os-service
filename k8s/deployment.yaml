@@ -58,6 +58,22 @@ spec:
                 secretKeyRef:
                   name: os-service-secrets
                   key: SPRING_RABBITMQ_PASSWORD
+            # Senhas do login de staff (admin, atendente, tecnico); a plataforma cria as chaves.
+            - name: APP_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-service-secrets
+                  key: APP_SECURITY_ADMIN_PASSWORD
+            - name: APP_SECURITY_ATTENDANT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-service-secrets
+                  key: APP_SECURITY_ATTENDANT_PASSWORD
+            - name: APP_SECURITY_TECHNICIAN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-service-secrets
+                  key: APP_SECURITY_TECHNICIAN_PASSWORD
             # Vazio desliga o agente do New Relic.
             - name: NEW_RELIC_LICENSE_KEY
               valueFrom:
