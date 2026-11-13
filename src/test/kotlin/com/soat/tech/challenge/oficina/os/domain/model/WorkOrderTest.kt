@@ -212,7 +212,7 @@ class WorkOrderTest {
 	}
 
 	@Test
-	fun `labels follow the spec`() {
+	fun `labels are the Portuguese names shown by the API`() {
 		assertEquals(
 			listOf(
 				"Recebida", "Aguardando Aprovação", "Aguardando Pagamento", "Na Fila", "Diagnóstico",

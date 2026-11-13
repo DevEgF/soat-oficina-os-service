@@ -99,3 +99,13 @@ data class StatusHistoryResponse(
 	val reason: String,
 	val occurredAt: Instant,
 )
+
+/**
+ * Customer as seen by the customer authentication service. [status] is always ACTIVE (this service has no
+ * customer blocking); the field exists because that service refuses customers that are not active.
+ */
+data class InternalCustomerResponse(val id: UUID, val status: String) {
+	companion object {
+		const val STATUS_ACTIVE = "ACTIVE"
+	}
+}

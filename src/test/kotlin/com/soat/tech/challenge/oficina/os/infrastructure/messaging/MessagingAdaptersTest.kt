@@ -5,6 +5,7 @@ import com.soat.tech.challenge.oficina.os.application.messaging.OutboundCommand
 import com.soat.tech.challenge.oficina.os.application.messaging.RequestPaymentPayload
 import com.soat.tech.challenge.oficina.os.application.saga.SagaOrchestrator
 import com.soat.tech.challenge.oficina.os.application.saga.SagaOutcome
+import com.soat.tech.challenge.oficina.os.support.RecordingTracing
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -33,9 +34,10 @@ import kotlin.test.assertTrue
 class MessagingAdaptersTest {
 
 	private val codec = EnvelopeCodec(jacksonMapperBuilder().build())
+	private val tracing = RecordingTracing()
 
 	@Test
-	fun `topology declares exchanges queues dead letter queues and bindings of the spec`() {
+	fun `topology declares exchanges queues dead letter queues and bindings of the contract`() {
 		val declarables = MessagingTopology().oficinaTopology()
 
 		val topic = declarables.getDeclarablesByType(TopicExchange::class.java).single()
@@ -103,7 +105,7 @@ class MessagingAdaptersTest {
 			"occurredAt":"2026-11-12T15:04:05Z","correlationId":"corr-xyz",
 			"payload":{"workOrderId":"$sagaId","finishedAt":"2026-11-12T16:00:00Z"}}"""
 
-		OsEventsListener(codec, orchestrator).onMessage(Message(body.toByteArray(), MessageProperties()))
+		OsEventsListener(codec, orchestrator, tracing).onMessage(Message(body.toByteArray(), MessageProperties()))
 
 		assertEquals("corr-xyz", mdcDuringHandling)
 		assertNull(MDC.get("requestId"))
@@ -114,8 +116,75 @@ class MessagingAdaptersTest {
 		val orchestrator = mockk<SagaOrchestrator>()
 
 		assertFailsWith<PoisonMessageException> {
-			OsEventsListener(codec, orchestrator).onMessage(Message("{".toByteArray(), MessageProperties()))
+			OsEventsListener(codec, orchestrator, tracing).onMessage(Message("{".toByteArray(), MessageProperties()))
 		}
 		verify(exactly = 0) { orchestrator.handle(any()) }
+	}
+
+	@Test
+	fun `listener hands the trace headers of the message to the agent before processing and names the transaction`() {
+		val orchestrator = mockk<SagaOrchestrator>()
+		val mdcDuringHandling = mutableMapOf<String, String?>()
+		every { orchestrator.handle(any()) } answers {
+			// The headers were accepted before the orchestrator ran (it publishes inside the same trace).
+			assertEquals(1, tracing.acceptedHeaders.size)
+			listOf("requestId", "sagaId", "messageType", "messageId").forEach { mdcDuringHandling[it] = MDC.get(it) }
+			SagaOutcome.APPLIED
+		}
+		val sagaId = UUID.randomUUID()
+		val messageId = UUID.randomUUID()
+		val body = """{"messageId":"$messageId","sagaId":"$sagaId","type":"QuoteApproved","occurredAt":"2026-11-12T15:04:05Z",
+			"correlationId":"corr-trace","payload":{"workOrderId":"$sagaId","quoteId":"${UUID.randomUUID()}","totalCents":10}}"""
+		val properties = MessageProperties().apply {
+			this.messageId = messageId.toString()
+			type = "QuoteApproved"
+			consumerQueue = "os.events"
+			setHeader("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+			setHeader("tracestate", "1@nr=0-0-1-2-3-4-1-1.0-0")
+			setHeader("newrelic", "eyJ2IjpbMCwxXX0=")
+			setHeader("x-correlation-id", "corr-trace")
+		}
+
+		OsEventsListener(codec, orchestrator, tracing).onMessage(Message(body.toByteArray(), properties))
+
+		val headers = tracing.acceptedHeaders.single()
+		assertEquals("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", headers["traceparent"])
+		assertEquals("1@nr=0-0-1-2-3-4-1-1.0-0", headers["tracestate"])
+		assertEquals("eyJ2IjpbMCwxXX0=", headers["newrelic"])
+		assertEquals(listOf("Message/os.events/QuoteApproved"), tracing.transactionNames)
+		assertEquals<Map<String, Any?>>(
+			mapOf(
+				"sagaId" to sagaId.toString(),
+				"messageType" to "QuoteApproved",
+				"messageId" to messageId.toString(),
+				"correlationId" to "corr-trace",
+			),
+			tracing.attributes,
+		)
+		assertEquals<Map<String, Any?>>(
+			mapOf("requestId" to "corr-trace", "sagaId" to sagaId.toString(), "messageType" to "QuoteApproved", "messageId" to messageId.toString()),
+			mdcDuringHandling,
+		)
+		listOf("requestId", "sagaId", "messageType", "messageId").forEach { assertNull(MDC.get(it), it) }
+	}
+
+	@Test
+	fun `poison message is still a named transaction and leaves the MDC clean`() {
+		val properties = MessageProperties().apply {
+			messageId = UUID.randomUUID().toString()
+			type = "QuoteApproved"
+		}
+
+		assertFailsWith<PoisonMessageException> {
+			OsEventsListener(codec, mockk<SagaOrchestrator>(), tracing).onMessage(Message("not json".toByteArray(), properties))
+		}
+
+		assertEquals(1, tracing.acceptedHeaders.size)
+		assertEquals(listOf("Message/os.events/QuoteApproved"), tracing.transactionNames)
+		assertNull(MDC.get("messageId"))
+		assertNull(MDC.get("messageType"))
+
+		OsEventsListener(codec, mockk<SagaOrchestrator>(), tracing).runCatching { onMessage(Message("{".toByteArray(), MessageProperties())) }
+		assertEquals("Message/os.events/unknown", tracing.transactionNames.last())
 	}
 }

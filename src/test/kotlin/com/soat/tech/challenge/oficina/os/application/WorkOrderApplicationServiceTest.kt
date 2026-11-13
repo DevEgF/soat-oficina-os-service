@@ -16,7 +16,9 @@ import com.soat.tech.challenge.oficina.os.domain.model.SagaStatus
 import com.soat.tech.challenge.oficina.os.domain.model.SagaStep
 import com.soat.tech.challenge.oficina.os.domain.model.ServiceLine
 import com.soat.tech.challenge.oficina.os.domain.model.WorkOrderStatus
+import com.soat.tech.challenge.oficina.os.application.saga.SagaLifecycle
 import com.soat.tech.challenge.oficina.os.support.InMemoryPorts
+import com.soat.tech.challenge.oficina.os.support.RecordingTracing
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
@@ -34,6 +36,7 @@ class WorkOrderApplicationServiceTest {
 	private val now = Instant.parse("2026-11-12T15:00:00Z")
 	private val ports = InMemoryPorts()
 	private val afterCommit = mockk<AfterCommitPublisher>(relaxed = true)
+	private val tracing = RecordingTracing()
 	private val service = WorkOrderApplicationService(
 		workOrders = ports.workOrderRepository,
 		customers = ports.customerRepository,
@@ -41,6 +44,7 @@ class WorkOrderApplicationServiceTest {
 		sagas = ports.sagaRepository,
 		history = ports.historyRepository,
 		afterCommit = afterCommit,
+		lifecycle = SagaLifecycle(tracing),
 		clock = Clock.fixed(now, ZoneOffset.UTC),
 	)
 
@@ -140,5 +144,30 @@ class WorkOrderApplicationServiceTest {
 		assertEquals(SagaStep.DELIVERY, delivered.saga.step)
 		assertEquals(listOf("WorkOrderOpened", "DeliveryRegistered"), service.history(id).map { it.reason })
 		assertEquals(id, service.get(id).workOrder.id)
+	}
+
+	@Test
+	fun `opening and delivery are recorded as transitions and the delivery finishes the saga`() {
+		val id = service.open(command()).workOrder.id
+		assertEquals(
+			mapOf("sagaId" to id.toString(), "fromStatus" to "", "toStatus" to "RECEIVED", "trigger" to "WorkOrderOpened", "sagaStatus" to "RUNNING"),
+			tracing.events(SagaLifecycle.TRANSITION_EVENT).single(),
+		)
+		val workOrder = ports.workOrders.getValue(id).apply {
+			registerQuote(1, 1, 2, now); approveQuote(now); confirmPayment(now)
+			startDiagnosis(now); startRepair(now); finish(now)
+		}
+		ports.sagas.getValue(id).follow(workOrder.status, now)
+
+		service.registerDelivery(id)
+
+		val delivered = tracing.events(SagaLifecycle.TRANSITION_EVENT).last()
+		assertEquals("DeliveryRegistered", delivered["trigger"])
+		assertEquals("FINALIZED", delivered["fromStatus"])
+		assertEquals("COMPLETED", delivered["sagaStatus"])
+		assertEquals(
+			mapOf("sagaId" to id.toString(), "outcome" to "COMPLETED", "durationMs" to 0L, "cancellationReason" to ""),
+			tracing.events(SagaLifecycle.FINISHED_EVENT).single(),
+		)
 	}
 }
