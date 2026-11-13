@@ -1,8 +1,8 @@
 # soat-oficina-os-service
 
 [![CI](https://github.com/DevEgF/soat-oficina-os-service/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/DevEgF/soat-oficina-os-service/actions/workflows/ci.yml?query=branch%3Adevelop)
-[![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=DevEgF_soat-oficina-os-service&metric=coverage&branch=develop)](https://sonarcloud.io/summary/new_code?id=DevEgF_soat-oficina-os-service&branch=develop)
-[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=DevEgF_soat-oficina-os-service&metric=alert_status&branch=develop)](https://sonarcloud.io/summary/new_code?id=DevEgF_soat-oficina-os-service&branch=develop)
+[![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=DevEgF_soat-oficina-os-service&metric=coverage)](https://sonarcloud.io/summary/new_code?id=DevEgF_soat-oficina-os-service)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=DevEgF_soat-oficina-os-service&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=DevEgF_soat-oficina-os-service)
 
 Serviço de **Ordens de Serviço (OS)** da oficina mecânica — Tech Challenge SOAT, Fase 4.
 
@@ -226,8 +226,10 @@ Cucumber); relatório HTML em `build/reports/cucumber/cucumber.html`. Só o BDD:
 **Sonar.** A análise roda pelo CI, não pela análise automática do SonarQube Cloud (o projeto não está
 vinculado ao GitHub, então ela não se aplica): o job `ci / build` roda `./gradlew sonar
 -Dsonar.qualitygate.wait=true` com o relatório do JaCoCo quando o secret `SONAR_TOKEN` existe, em pull
-requests e em push na `main` e na `develop` (projeto `DevEgF_soat-oficina-os-service`, organização
-`devegf-soat-oficina`). Os badges do topo mostram a `develop`. O job `ci / image` faz o build da imagem,
+requests e em push na `main` (projeto `DevEgF_soat-oficina-os-service`, organização
+`devegf-soat-oficina`); o plano gratuito do SonarQube Cloud não analisa outras branches, então o push
+na `develop` roda testes, gate de cobertura e imagem, sem o Sonar. O badge do CI mostra a `develop`;
+os do Sonar, a `main`. O job `ci / image` faz o build da imagem,
 sem push.
 
 **Verificação de dependências.** `gradle/verification-metadata.xml` guarda o SHA-256 de tudo o que o
