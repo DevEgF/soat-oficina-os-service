@@ -41,6 +41,7 @@ import com.soat.tech.challenge.oficina.os.domain.model.WorkOrder
 import com.soat.tech.challenge.oficina.os.domain.model.WorkOrderSaga
 import com.soat.tech.challenge.oficina.os.domain.model.WorkOrderStatus
 import com.soat.tech.challenge.oficina.os.support.InMemoryPorts
+import com.soat.tech.challenge.oficina.os.support.RecordingTracing
 import io.mockk.clearMocks
 import io.mockk.confirmVerified
 import io.mockk.mockk
@@ -60,6 +61,8 @@ class SagaOrchestratorTest {
 	private val now = Instant.parse("2026-11-12T15:00:00Z")
 	private val ports = InMemoryPorts()
 	private val afterCommit = mockk<AfterCommitPublisher>(relaxed = true)
+	private val tracing = RecordingTracing()
+	private val lifecycle = SagaLifecycle(tracing)
 	private val orchestrator = SagaOrchestrator(
 		workOrders = ports.workOrderRepository,
 		sagas = ports.sagaRepository,
@@ -68,6 +71,7 @@ class SagaOrchestratorTest {
 		customers = ports.customerRepository,
 		vehicles = ports.vehicleRepository,
 		afterCommit = afterCommit,
+		lifecycle = lifecycle,
 		clock = Clock.fixed(now, ZoneOffset.UTC),
 	)
 	private val quoteId = UUID.randomUUID()
@@ -425,6 +429,7 @@ class SagaOrchestratorTest {
 		customers = ports.customerRepository,
 		vehicles = ports.vehicleRepository,
 		afterCommit = afterCommit,
+		lifecycle = lifecycle,
 		clock = Clock.fixed(instant, ZoneOffset.UTC),
 	)
 
@@ -481,5 +486,78 @@ class SagaOrchestratorTest {
 		// In production the transaction rolls back and the listener retries, then dead-letters.
 		assertFailsWith<NotFoundException> { orchestrator.handle(paymentApproved()) }
 		verify(exactly = 1) { afterCommit.publishAfterCommit(any()) }
+	}
+
+	// ---- telemetry ----
+
+	@Test
+	fun `every applied change is a SagaTransition and the end of the compensation a SagaFinished`() {
+		orchestrator.handle(quoteGenerated())
+		orchestrator.handle(quoteApproved())
+		orchestrator.handle(paymentRejected())
+		orchestratorAt(now.plusSeconds(90)).handle(quoteCancelled())
+
+		val transitions = tracing.events(SagaLifecycle.TRANSITION_EVENT)
+		assertEquals(listOf("QuoteGenerated", "QuoteApproved", "PaymentRejected", "QuoteCancelled"), transitions.map { it["trigger"] })
+		assertEquals(
+			mapOf(
+				"sagaId" to workOrder.id.toString(),
+				"fromStatus" to "AWAITING_PAYMENT",
+				"toStatus" to "CANCELLED",
+				"trigger" to "PaymentRejected",
+				"sagaStatus" to "COMPENSATING",
+			),
+			transitions[2],
+		)
+		assertEquals("CANCELLED", transitions[3]["fromStatus"])
+		assertEquals("COMPENSATED", transitions[3]["sagaStatus"])
+		assertEquals(
+			listOf(
+				mapOf(
+					"sagaId" to workOrder.id.toString(),
+					"outcome" to "COMPENSATED",
+					"durationMs" to 90_000L,
+					"cancellationReason" to "PaymentRejected",
+				),
+			),
+			tracing.events(SagaLifecycle.FINISHED_EVENT),
+		)
+	}
+
+	@Test
+	fun `discarded duplicate and ignored messages record no telemetry`() {
+		val generated = quoteGenerated()
+		orchestrator.handle(generated)
+		tracing.events.clear()
+
+		orchestrator.handle(generated)
+		orchestrator.handle(executionFinished())
+		orchestrator.handle(event(MessageType.GENERATE_QUOTE, GenerateQuotePayload(workOrder.id, "t", CustomerPayload("x"), emptyList(), emptyList())))
+
+		assertTrue(tracing.events.isEmpty())
+	}
+
+	@Test
+	fun `cancellation without anything to undo finishes the saga at once`() {
+		orchestrator.handle(quoteGenerationFailed())
+
+		assertEquals("QuoteGenerationFailed", tracing.events(SagaLifecycle.TRANSITION_EVENT).single()["trigger"])
+		val finished = tracing.events(SagaLifecycle.FINISHED_EVENT).single()
+		assertEquals("COMPENSATED", finished["outcome"])
+		assertEquals("QuoteGenerationFailed", finished["cancellationReason"])
+	}
+
+	@Test
+	fun `approval deadline is recorded with the ApprovalTimeout trigger`() {
+		orchestrator.handle(quoteGenerated())
+		tracing.events.clear()
+
+		orchestratorAt(now.plus(deadline).plusSeconds(1)).expireApproval(workOrder.id, deadline)
+
+		val transition = tracing.events(SagaLifecycle.TRANSITION_EVENT).single()
+		assertEquals("ApprovalTimeout", transition["trigger"])
+		assertEquals("PENDING_APPROVAL", transition["fromStatus"])
+		assertEquals("COMPENSATING", transition["sagaStatus"])
+		assertTrue(tracing.events(SagaLifecycle.FINISHED_EVENT).isEmpty())
 	}
 }

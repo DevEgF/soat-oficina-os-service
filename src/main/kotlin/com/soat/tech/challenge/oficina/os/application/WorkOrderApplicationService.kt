@@ -1,7 +1,10 @@
 package com.soat.tech.challenge.oficina.os.application
 
 import com.soat.tech.challenge.oficina.os.application.messaging.AfterCommitPublisher
+import com.soat.tech.challenge.oficina.os.application.observability.addKeyValueUnlessInMdc
 import com.soat.tech.challenge.oficina.os.application.saga.SagaCommands
+import com.soat.tech.challenge.oficina.os.application.saga.SagaLifecycle
+import com.soat.tech.challenge.oficina.os.application.saga.SagaSnapshot
 import com.soat.tech.challenge.oficina.os.domain.exception.BusinessRuleException
 import com.soat.tech.challenge.oficina.os.domain.exception.NotFoundException
 import com.soat.tech.challenge.oficina.os.domain.model.Customer
@@ -51,6 +54,7 @@ class WorkOrderApplicationService(
 	private val sagas: WorkOrderSagaRepository,
 	private val history: StatusHistoryRepository,
 	private val afterCommit: AfterCommitPublisher,
+	private val lifecycle: SagaLifecycle,
 	private val clock: Clock,
 ) {
 
@@ -94,9 +98,10 @@ class WorkOrderApplicationService(
 		val saga = sagas.save(WorkOrderSaga.start(workOrder.id, command.correlationId, now))
 		history.append(StatusChange(workOrder.id, null, workOrder.status, REASON_OPENED, now))
 		afterCommit.publishAfterCommit(SagaCommands.generateQuote(workOrder, customer, saga))
+		lifecycle.record(null, workOrder, saga, REASON_OPENED, now)
 		log.atInfo()
 			.addKeyValue("workOrderId", workOrder.id)
-			.addKeyValue("sagaId", saga.id)
+			.addKeyValueUnlessInMdc("sagaId", saga.id)
 			.log("work_order.opened")
 		return WorkOrderDetails(workOrder, customer, vehicle, saga)
 	}
@@ -117,11 +122,13 @@ class WorkOrderApplicationService(
 		val workOrder = load(id)
 		val saga = loadSaga(id)
 		val fromStatus = workOrder.status
+		val before = SagaSnapshot.of(workOrder, saga)
 		workOrder.registerDelivery(now)
 		saga.follow(workOrder.status, now)
 		workOrders.save(workOrder)
 		sagas.save(saga)
 		history.append(StatusChange(workOrder.id, fromStatus, workOrder.status, REASON_DELIVERED, now))
+		lifecycle.record(before, workOrder, saga, REASON_DELIVERED, now)
 		log.atInfo().addKeyValue("workOrderId", id).log("work_order.delivered")
 		return details(workOrder, saga)
 	}

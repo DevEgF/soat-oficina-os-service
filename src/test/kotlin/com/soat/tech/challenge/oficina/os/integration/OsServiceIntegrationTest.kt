@@ -53,6 +53,7 @@ class OsServiceIntegrationTest : IntegrationTestSupport() {
             "/api/work-orders/{id}",
             "/api/work-orders/{id}/history",
             "/api/work-orders/{id}/delivery",
+            "/api/internal/customers/{taxId}",
         ).forEach { assertTrue(paths.has(it), it) }
     }
 

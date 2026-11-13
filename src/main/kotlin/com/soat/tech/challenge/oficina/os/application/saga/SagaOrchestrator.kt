@@ -16,6 +16,7 @@ import com.soat.tech.challenge.oficina.os.application.messaging.QuoteCancelledPa
 import com.soat.tech.challenge.oficina.os.application.messaging.QuoteGeneratedPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.QuoteGenerationFailedPayload
 import com.soat.tech.challenge.oficina.os.application.messaging.QuoteRejectedPayload
+import com.soat.tech.challenge.oficina.os.application.observability.addKeyValueUnlessInMdc
 import com.soat.tech.challenge.oficina.os.domain.exception.BusinessRuleException
 import com.soat.tech.challenge.oficina.os.domain.exception.DomainException
 import com.soat.tech.challenge.oficina.os.domain.exception.NotFoundException
@@ -62,6 +63,7 @@ class SagaOrchestrator(
 	private val customers: CustomerRepository,
 	private val vehicles: VehicleRepository,
 	private val afterCommit: AfterCommitPublisher,
+	private val lifecycle: SagaLifecycle,
 	private val clock: Clock,
 ) {
 
@@ -100,6 +102,7 @@ class SagaOrchestrator(
 			return SagaOutcome.UNKNOWN_SAGA
 		}
 		val fromStatus = workOrder.status
+		val before = SagaSnapshot.of(workOrder, saga)
 		val commands = try {
 			step.apply(workOrder, saga, event, now)
 		} catch (e: DomainException) {
@@ -113,6 +116,7 @@ class SagaOrchestrator(
 		}
 		persist(workOrder, saga, fromStatus, event.type.typeName, now, event.messageId)
 		commands.forEach(afterCommit::publishAfterCommit)
+		lifecycle.record(before, workOrder, saga, event.type.typeName, now)
 		applied(log(event, SagaOutcome.APPLIED), workOrder, saga, fromStatus, commands).log("saga.event.applied")
 		return SagaOutcome.APPLIED
 	}
@@ -129,11 +133,13 @@ class SagaOrchestrator(
 		val workOrder = workOrders.findById(workOrderId) ?: return false
 		if (!workOrder.approvalOverdue(deadline, now)) return false
 		val fromStatus = workOrder.status
+		val before = SagaSnapshot.of(workOrder, saga)
 		val cause = CancellationCause.APPROVAL_TIMEOUT
 		val commands = cancel(workOrder, saga, cause, "Quote not approved within $deadline", now)
 		persist(workOrder, saga, fromStatus, cause.reason, now, messageId = null)
 		commands.forEach(afterCommit::publishAfterCommit)
-		applied(log.atInfo().addKeyValue("type", cause.reason).addKeyValue("sagaId", saga.id), workOrder, saga, fromStatus, commands)
+		lifecycle.record(before, workOrder, saga, cause.reason, now)
+		applied(log.atInfo().addKeyValue("type", cause.reason).addKeyValueUnlessInMdc("sagaId", saga.id), workOrder, saga, fromStatus, commands)
 			.log("saga.approval_timeout.applied")
 		return true
 	}
@@ -289,8 +295,8 @@ class SagaOrchestrator(
 
 	private fun keys(builder: LoggingEventBuilder, event: IncomingMessage, outcome: SagaOutcome) = builder
 		.addKeyValue("type", event.type.typeName)
-		.addKeyValue("sagaId", event.sagaId)
-		.addKeyValue("messageId", event.messageId)
+		.addKeyValueUnlessInMdc("sagaId", event.sagaId)
+		.addKeyValueUnlessInMdc("messageId", event.messageId)
 		.addKeyValue("outcome", outcome.name)
 
 	private companion object {

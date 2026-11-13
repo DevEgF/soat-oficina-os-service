@@ -37,7 +37,7 @@ class EnvelopeCodecTest {
 	""".trimIndent()
 
 	@Test
-	fun `encode writes the spec envelope with amqp properties and no type id header`() {
+	fun `encode writes the contract envelope with amqp properties and no type id header`() {
 		val command = OutboundCommand(
 			sagaId = sagaId,
 			type = MessageType.GENERATE_QUOTE,

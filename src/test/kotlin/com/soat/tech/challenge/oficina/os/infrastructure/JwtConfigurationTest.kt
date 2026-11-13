@@ -3,10 +3,12 @@ package com.soat.tech.challenge.oficina.os.infrastructure
 import com.soat.tech.challenge.oficina.os.support.TestJwt
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.springframework.mock.env.MockEnvironment
 import org.springframework.security.oauth2.jwt.JwtException
 import org.springframework.security.oauth2.jwt.JwtValidationException
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter
 import java.time.Instant
 import java.util.Base64
 
@@ -41,6 +43,18 @@ class JwtConfigurationTest {
     fun `decoder accepts customer and staff subjects in active environment`() {
         assertEquals(TestJwt.SUBJECT, decoder.decode(TestJwt.token()).subject)
         assertEquals("admin", decoder.decode(TestJwt.token(subject = "admin", scope = listOf("ADMIN"))).subject)
+    }
+
+    @Test
+    fun `decoder accepts the internal token of the authentication service with the INTERNAL authority`() {
+        // Subject is the service name (not a UUID) and the token lives 60 seconds.
+        val jwt = decoder.decode(
+            TestJwt.token(subject = "soat-oficina-auth", scope = listOf("INTERNAL"), expiresAt = Instant.now().plusSeconds(60)),
+        )
+
+        assertEquals("soat-oficina-auth", jwt.subject)
+        val authorities = JwtAuthenticationConverter().convert(jwt).authorities.map { it.authority }
+        assertTrue("SCOPE_INTERNAL" in authorities, authorities.toString())
     }
 
     @Test

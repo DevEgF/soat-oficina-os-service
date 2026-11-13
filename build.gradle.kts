@@ -1,7 +1,7 @@
 plugins {
 	kotlin("jvm") version "2.4.10"
 	kotlin("plugin.spring") version "2.4.10"
-	id("org.springframework.boot") version "4.1.1"
+	id("org.springframework.boot") version "4.1.2"
 	id("io.spring.dependency-management") version "1.1.7"
 	id("org.sonarqube") version "7.5.0.8588"
 	jacoco
@@ -9,10 +9,6 @@ plugins {
 
 group = "com.soat.tech.challenge.oficina"
 version = "0.0.1"
-
-// Security fixes beyond the Spring Boot 4.1.1 BOM; keep embedded Tomcat modules aligned.
-// https://tomcat.apache.org/security-11.html#Fixed_in_Apache_Tomcat_11.0.25
-extra["tomcat.version"] = "11.0.25"
 
 java {
 	toolchain {
@@ -37,6 +33,8 @@ dependencies {
 	// Jackson 3 (tools.jackson) is what Spring MVC and the message envelope use in Boot 4.
 	implementation("tools.jackson.module:jackson-module-kotlin")
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
+	// Same version as the Java agent in the Dockerfile; without the agent every call is a no-op.
+	implementation("com.newrelic.agent.java:newrelic-api:9.4.0")
 
 	// Persistence (PostgreSQL). The Execution service swaps this block for spring-boot-starter-data-mongodb.
 	implementation("org.springframework.boot:spring-boot-starter-data-jpa")
@@ -52,6 +50,12 @@ dependencies {
 	testImplementation("org.testcontainers:testcontainers-junit-jupiter")
 	testImplementation("org.testcontainers:testcontainers-postgresql")
 	testImplementation("org.testcontainers:testcontainers-rabbitmq")
+	// BDD: Gherkin scenarios run by the JUnit Platform (suite engine + Cucumber engine) in the same `test` task.
+	testImplementation(platform("io.cucumber:cucumber-bom:8.0.4"))
+	testImplementation("io.cucumber:cucumber-java")
+	testImplementation("io.cucumber:cucumber-spring")
+	testImplementation("io.cucumber:cucumber-junit-platform-engine")
+	testImplementation("org.junit.platform:junit-platform-suite")
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

@@ -1,5 +1,6 @@
 package com.soat.tech.challenge.oficina.os.application.saga
 
+import com.soat.tech.challenge.oficina.os.application.observability.addKeyValueUnlessInMdc
 import com.soat.tech.challenge.oficina.os.domain.port.WorkOrderRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
@@ -28,7 +29,7 @@ class ApprovalTimeoutService(
 				if (orchestrator.expireApproval(id, deadline)) cancelled++
 			} catch (e: RuntimeException) {
 				log.atError()
-					.addKeyValue("sagaId", id)
+					.addKeyValueUnlessInMdc("sagaId", id)
 					.addKeyValue("exceptionClass", e.javaClass.name)
 					.addKeyValue("detail", e.message)
 					.log("saga.approval_timeout.failed")
