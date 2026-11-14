@@ -10,6 +10,8 @@ data:
   APP_ENVIRONMENT: "hml"
   # Validade do token emitido no login de staff.
   APP_JWT_EXPIRATION_MINUTES: "60"
+  # Prazo para o cliente aprovar o orçamento (duração ISO-8601); vencido, a OS é cancelada.
+  APP_SAGA_APPROVAL_TIMEOUT: "PT30M"
   SPRING_DATASOURCE_URL: "jdbc:postgresql://os-postgres:5432/os"
   SPRING_DATASOURCE_USERNAME: "os"
   SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "4"
@@ -23,7 +25,11 @@ data:
   NEW_RELIC_DISTRIBUTED_TRACING_ENABLED: "true"
   NEW_RELIC_APPLICATION_LOGGING_ENABLED: "true"
   NEW_RELIC_APPLICATION_LOGGING_FORWARDING_ENABLED: "true"
+  # Logs encaminhados levam o MDC (requestId e, no consumo de mensagens, sagaId, messageType e messageId).
+  NEW_RELIC_APPLICATION_LOGGING_FORWARDING_CONTEXT_DATA_ENABLED: "true"
   NEW_RELIC_APPLICATION_LOGGING_LOCAL_DECORATING_ENABLED: "false"
-  NEW_RELIC_ATTRIBUTES_EXCLUDE: "request.parameters.*,request.headers.*,response.headers.*,cpf,authorization,password"
+  # request.uri fica de fora porque a rota interna de clientes leva o CPF/CNPJ no caminho; o nome da
+  # transação continua com o padrão da rota (/api/internal/customers/{taxId}).
+  NEW_RELIC_ATTRIBUTES_EXCLUDE: "request.uri,request.parameters.*,request.headers.*,response.headers.*,cpf,authorization,password"
   NEW_RELIC_TRANSACTION_TRACER_RECORD_SQL: "off"
   NEW_RELIC_LABELS: "environment:hml;service:os-service"

@@ -1,5 +1,6 @@
 package com.soat.tech.challenge.oficina.os.application.messaging
 
+import com.soat.tech.challenge.oficina.os.application.observability.addKeyValueUnlessInMdc
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import org.springframework.transaction.support.TransactionSynchronization
@@ -27,7 +28,7 @@ class AfterCommitPublisher(private val publisher: CommandPublisher) {
 			// The state is committed; without an outbox the command is lost and the saga stalls at this step.
 			log.atError()
 				.addKeyValue("type", command.type.typeName)
-				.addKeyValue("sagaId", command.sagaId)
+				.addKeyValueUnlessInMdc("sagaId", command.sagaId)
 				.addKeyValue("exceptionClass", it.javaClass.name)
 				.log("message.publish.failed")
 		}

@@ -13,6 +13,8 @@ import com.soat.tech.challenge.oficina.os.domain.port.StatusHistoryRepository
 import com.soat.tech.challenge.oficina.os.domain.port.VehicleRepository
 import com.soat.tech.challenge.oficina.os.domain.port.WorkOrderRepository
 import com.soat.tech.challenge.oficina.os.domain.port.WorkOrderSagaRepository
+import com.soat.tech.challenge.oficina.os.domain.model.WorkOrderStatus
+import org.springframework.data.domain.Limit
 import org.springframework.stereotype.Component
 import java.time.Instant
 import java.util.UUID
@@ -40,12 +42,18 @@ class WorkOrderRepositoryAdapter(private val jpa: WorkOrderJpaRepository) : Work
 	}
 
 	override fun findById(id: UUID): WorkOrder? = jpa.findById(id.toString()).orElse(null)?.toDomain()
+
+	override fun findAwaitingApprovalSince(quotedBefore: Instant, limit: Int): List<UUID> =
+		jpa.findIdsByStatusQuotedBefore(WorkOrderStatus.PENDING_APPROVAL.name, quotedBefore, Limit.of(limit))
+			.map(UUID::fromString)
 }
 
 @Component
 class WorkOrderSagaRepositoryAdapter(private val jpa: WorkOrderSagaJpaRepository) : WorkOrderSagaRepository {
 	override fun save(saga: WorkOrderSaga): WorkOrderSaga = jpa.save(saga.toEntity()).toDomain()
 	override fun findById(id: UUID): WorkOrderSaga? = jpa.findById(id.toString()).orElse(null)?.toDomain()
+
+	override fun findByIdForUpdate(id: UUID): WorkOrderSaga? = jpa.findForUpdate(id.toString())?.toDomain()
 }
 
 @Component

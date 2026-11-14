@@ -1,6 +1,7 @@
 package com.soat.tech.challenge.oficina.os.domain.model
 
 import com.soat.tech.challenge.oficina.os.domain.exception.InvalidStatusTransitionException
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
@@ -45,6 +46,7 @@ class WorkOrder(
 	finishedAt: Instant? = null,
 	deliveredAt: Instant? = null,
 	cancelledAt: Instant? = null,
+	cancellationReason: String? = null,
 ) {
 	var status: WorkOrderStatus = status
 		private set
@@ -72,6 +74,19 @@ class WorkOrder(
 		private set
 	var cancelledAt: Instant? = cancelledAt
 		private set
+
+	/** [CancellationCause.reason] of the cancellation, null while the work order is not cancelled. */
+	var cancellationReason: String? = cancellationReason
+		private set
+
+	/**
+	 * True when the work order has waited in PENDING_APPROVAL longer than [deadline]. The reference is
+	 * the entry in PENDING_APPROVAL ([quotedAt]).
+	 */
+	fun approvalOverdue(deadline: Duration, now: Instant): Boolean {
+		val since = quotedAt ?: return false
+		return status == WorkOrderStatus.PENDING_APPROVAL && since.plus(deadline) < now
+	}
 
 	/** Billing priced the order: totals are stored as received (cents). */
 	fun registerQuote(servicesTotalCents: Long, partsTotalCents: Long, totalCents: Long, now: Instant) {
@@ -113,14 +128,15 @@ class WorkOrder(
 		deliveredAt = now
 	}
 
-	/** Compensation end state: any status before delivery can be cancelled. */
-	fun cancel(now: Instant) {
-		if (status.terminal || status == WorkOrderStatus.FINALIZED) {
-			throw InvalidStatusTransitionException(status.name, "cancel")
+	/** Compensation end state; each cause applies only to the status it can happen in. */
+	fun cancel(cause: CancellationCause, now: Instant) {
+		if (status !in cause.allowedFrom) {
+			throw InvalidStatusTransitionException(status.name, "cancel(${cause.reason})")
 		}
 		status = WorkOrderStatus.CANCELLED
 		updatedAt = now
 		cancelledAt = now
+		cancellationReason = cause.reason
 	}
 
 	private fun moveFrom(expected: WorkOrderStatus, target: WorkOrderStatus, action: String, now: Instant) {

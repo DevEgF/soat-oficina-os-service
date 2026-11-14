@@ -2,6 +2,7 @@ package com.soat.tech.challenge.oficina.os.infrastructure.messaging
 
 import com.soat.tech.challenge.oficina.os.application.messaging.CommandPublisher
 import com.soat.tech.challenge.oficina.os.application.messaging.OutboundCommand
+import com.soat.tech.challenge.oficina.os.application.observability.addKeyValueUnlessInMdc
 import org.slf4j.LoggerFactory
 import org.springframework.amqp.rabbit.core.RabbitTemplate
 import org.springframework.stereotype.Component
@@ -21,8 +22,9 @@ class RabbitCommandPublisher(
 		rabbitTemplate.send(Topology.EXCHANGE, command.type.routingKey, message)
 		log.atInfo()
 			.addKeyValue("type", command.type.typeName)
-			.addKeyValue("sagaId", command.sagaId)
-			.addKeyValue("messageId", messageId)
+			.addKeyValueUnlessInMdc("sagaId", command.sagaId)
+			// Not "messageId": inside a consumer the MDC messageId is the consumed message.
+			.addKeyValue("publishedMessageId", messageId)
 			.addKeyValue("routingKey", command.type.routingKey)
 			.log("message.published")
 	}

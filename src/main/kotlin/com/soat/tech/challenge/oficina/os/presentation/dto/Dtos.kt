@@ -61,7 +61,16 @@ data class VehicleResponse(
 	val year: Int,
 )
 
-data class SagaResponse(val status: String, val step: String)
+/**
+ * [failureReason]: text sent by the participant that failed (null while nothing failed);
+ * [pendingCompensations]: CANCEL_QUOTE and/or REFUND_PAYMENT still waiting for Billing's confirmation.
+ */
+data class SagaResponse(
+	val status: String,
+	val step: String,
+	val failureReason: String?,
+	val pendingCompensations: List<String>,
+)
 
 data class WorkOrderResponse(
 	val id: UUID,
@@ -77,6 +86,8 @@ data class WorkOrderResponse(
 	val servicesTotalCents: Long?,
 	val partsTotalCents: Long?,
 	val totalCents: Long?,
+	/** Type of the trigger of the cancellation (same as the history reason), null when not cancelled. */
+	val cancellationReason: String?,
 	val saga: SagaResponse,
 	val createdAt: Instant,
 	val updatedAt: Instant,
@@ -88,3 +99,13 @@ data class StatusHistoryResponse(
 	val reason: String,
 	val occurredAt: Instant,
 )
+
+/**
+ * Customer as seen by the customer authentication service. [status] is always ACTIVE (this service has no
+ * customer blocking); the field exists because that service refuses customers that are not active.
+ */
+data class InternalCustomerResponse(val id: UUID, val status: String) {
+	companion object {
+		const val STATUS_ACTIVE = "ACTIVE"
+	}
+}

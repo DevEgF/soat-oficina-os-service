@@ -68,10 +68,17 @@ class SecurityConfiguration {
 				"/swagger-ui.html",
 				"/api/public/auth/login",
 			).permitAll()
+			// Service-to-service routes: only the internal token (scope INTERNAL) of the authentication service.
+			authorize.requestMatchers("/api/internal/**").hasAuthority(INTERNAL_AUTHORITY)
 			authorize.requestMatchers("/api/**").authenticated()
 			authorize.anyRequest().denyAll()
 		}
 		http.oauth2ResourceServer { oauth2 -> oauth2.jwt { it.decoder(jwtDecoder) } }
 		return http.build()
+	}
+
+	companion object {
+		/** Authority of the token the authentication service signs for itself (scope ["INTERNAL"]). */
+		const val INTERNAL_AUTHORITY = "SCOPE_INTERNAL"
 	}
 }

@@ -5,54 +5,14 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.springframework.amqp.core.AmqpAdmin
-import org.springframework.amqp.core.BindingBuilder
 import org.springframework.amqp.core.Message
 import org.springframework.amqp.core.MessageDeliveryMode
 import org.springframework.amqp.core.MessageProperties
-import org.springframework.amqp.core.Queue
-import org.springframework.amqp.core.TopicExchange
-import org.springframework.amqp.rabbit.core.RabbitTemplate
-import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.jdbc.core.JdbcTemplate
-import java.net.URI
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.util.UUID
-import kotlin.random.Random
 
-/**
- * Drives the saga from the edge: HTTP on this service, and Billing/Execution simulated by publishing their
- * events on the oficina exchange (envelope of the spec) and reading the commands from test queues bound
- * to the same exchange.
- */
-class SagaFlowIntegrationTest : IntegrationTestSupport() {
-
-	@Autowired
-	private lateinit var rabbitTemplate: RabbitTemplate
-
-	@Autowired
-	private lateinit var amqpAdmin: AmqpAdmin
-
-	@Autowired
-	private lateinit var jdbc: JdbcTemplate
-
-	private lateinit var token: String
-
-	@BeforeEach
-	fun setUp() {
-		val exchange = TopicExchange("oficina", true, false)
-		listOf(BILLING_TEST_QUEUE to "command.billing.#", EXECUTION_TEST_QUEUE to "command.execution.#").forEach { (name, pattern) ->
-			val queue = Queue(name, false, false, false)
-			amqpAdmin.declareQueue(queue)
-			amqpAdmin.declareBinding(BindingBuilder.bind(queue).to(exchange).with(pattern))
-		}
-		val login = post("/api/public/auth/login", """{"username":"atendente","password":"atendente"}""")
-		assertEquals(200, login.statusCode())
-		token = body(login)["accessToken"].asText()
-	}
+/** Happy path of the saga and the consumer rules (idempotency, out of order events, DLQ, retry). */
+class SagaFlowIntegrationTest : SagaIntegrationTestSupport() {
 
 	@Test
 	fun `work order goes from RECEIVED to DELIVERED through the saga with the full history`() {
@@ -72,6 +32,10 @@ class SagaFlowIntegrationTest : IntegrationTestSupport() {
 		assertTrue(workOrder["totalCents"].isNull)
 		assertEquals("RUNNING", workOrder["saga"]["status"].asText())
 		assertEquals("QUOTE_GENERATION", workOrder["saga"]["step"].asText())
+		assertTrue(workOrder["cancellationReason"].isNull)
+		assertTrue(workOrder["saga"]["failureReason"].isNull)
+		assertTrue(workOrder["saga"]["pendingCompensations"].isArray)
+		assertEquals(0, workOrder["saga"]["pendingCompensations"].size())
 
 		// 1. GenerateQuote reaches billing.commands' binding.
 		val generateQuote = awaitCommand(BILLING_TEST_QUEUE, "GenerateQuote", id)
@@ -188,20 +152,23 @@ class SagaFlowIntegrationTest : IntegrationTestSupport() {
 	}
 
 	@Test
-	fun `out of order and failure events leave the work order untouched`() {
+	fun `events that do not apply to the current status leave the work order untouched`() {
 		val id = openWorkOrder()
 		val quoteId = UUID.randomUUID().toString()
 		publishEvent("ExecutionFinished", "event.execution.finished", id, """{"workOrderId":"$id","finishedAt":"2026-11-12T18:00:00Z"}""")
+		// Rejection, payment refusal and execution failure only apply after the quote, the approval and the payment.
 		publishEvent("QuoteRejected", "event.billing.quote-rejected", id, """{"workOrderId":"$id","quoteId":"$quoteId","reason":"caro"}""")
-		publishEvent("QuoteGenerationFailed", "event.billing.quote-generation-failed", id, """{"workOrderId":"$id","reason":"X"}""")
 		publishEvent(
-			"QuoteGenerated", "event.billing.quote-generated", id,
-			"""{"workOrderId":"$id","quoteId":"$quoteId","servicesTotalCents":1,"partsTotalCents":2,"totalCents":3}""",
+			"PaymentRejected", "event.billing.payment-rejected", id,
+			"""{"workOrderId":"$id","quoteId":"$quoteId","paymentId":"${UUID.randomUUID()}","reason":"recusado"}""",
 		)
-		awaitStatus(id, "PENDING_APPROVAL")
+		publishEvent("ExecutionFailed", "event.execution.failed", id, """{"workOrderId":"$id","reason":"motor"}""")
+		publishEvent("QuoteCancelled", "event.billing.quote-cancelled", id, """{"workOrderId":"$id","quoteId":"$quoteId"}""")
+		quoteGenerated(id, quoteId)
+		val pending = awaitStatus(id, "PENDING_APPROVAL")
 
-		val reasons = body(get("/api/work-orders/$id/history", token)).map { it["reason"].asText() }
-		assertEquals(listOf("WorkOrderOpened", "QuoteGenerated"), reasons)
+		assertEquals("RUNNING", pending["saga"]["status"].asText())
+		assertEquals(listOf("WorkOrderOpened", "QuoteGenerated"), history(id).map { it.third })
 	}
 
 	@Test
@@ -273,99 +240,5 @@ class SagaFlowIntegrationTest : IntegrationTestSupport() {
 		val id = openWorkOrder()
 		assertEquals(409, post("/api/work-orders/$id/delivery", null, token).statusCode())
 		assertEquals("RECEIVED", body(get("/api/work-orders/$id", token))["status"].asText())
-	}
-
-	// ---- helpers ----
-
-	private data class ReceivedCommand(val envelope: JsonNode, val properties: MessageProperties, val routingKey: String?)
-
-	private fun openWorkOrder(): String {
-		val response = post("/api/work-orders", workOrderBody(randomCpf(), randomPlate()), token)
-		assertEquals(201, response.statusCode(), response.body())
-		return body(response)["id"].asText()
-	}
-
-	private fun workOrderBody(cpf: String, plate: String, quantity: Int = 1) = """
-		{
-		  "customer": { "taxId": "$cpf", "name": "Maria Silva", "email": "maria@example.com", "phone": "11999990000" },
-		  "vehicle": { "plate": "$plate", "brand": "Fiat", "model": "Argo", "year": 2022 },
-		  "services": [ { "code": "TROCA_OLEO", "quantity": $quantity } ],
-		  "parts": [ { "code": "FILTRO_OLEO", "quantity": 2 } ]
-		}
-	""".trimIndent()
-
-	private fun postWithCorrelation(path: String, body: String, correlationId: String): HttpResponse<String> {
-		val request = HttpRequest.newBuilder(URI.create("http://localhost:$port$path"))
-			.header("Content-Type", "application/json")
-			.header("Authorization", "Bearer $token")
-			.header("X-Correlation-Id", correlationId)
-			.POST(HttpRequest.BodyPublishers.ofString(body))
-			.build()
-		return http.send(request, HttpResponse.BodyHandlers.ofString())
-	}
-
-	/** Publishes an event as Billing/Execution would: envelope of the spec, plus an unknown field. */
-	private fun publishEvent(type: String, routingKey: String, sagaId: String, payload: String, messageId: String = UUID.randomUUID().toString()) {
-		val envelope = """{"messageId":"$messageId","sagaId":"$sagaId","type":"$type","occurredAt":"2026-11-12T15:04:05.123Z",""" +
-			""""correlationId":"itest-corr-happy","payload":$payload,"producer":"itest"}"""
-		val properties = MessageProperties().apply {
-			contentType = MessageProperties.CONTENT_TYPE_JSON
-			deliveryMode = MessageDeliveryMode.PERSISTENT
-			this.messageId = messageId
-			this.type = type
-			setHeader("x-correlation-id", "itest-corr-happy")
-		}
-		rabbitTemplate.send("oficina", routingKey, Message(envelope.toByteArray(), properties))
-	}
-
-	/** Reads the test queue until the command of this saga shows up (other tests share the queue). */
-	private fun awaitCommand(queue: String, type: String, sagaId: String): ReceivedCommand {
-		val deadline = System.currentTimeMillis() + TIMEOUT_MS
-		while (System.currentTimeMillis() < deadline) {
-			val message = rabbitTemplate.receive(queue, 500) ?: continue
-			val envelope = json.readTree(message.body)
-			if (envelope["sagaId"].asText() == sagaId && envelope["type"].asText() == type) {
-				return ReceivedCommand(envelope, message.messageProperties, message.messageProperties.receivedRoutingKey)
-			}
-		}
-		throw AssertionError("$type for $sagaId not published to $queue")
-	}
-
-	private fun awaitStatus(id: String, status: String): JsonNode {
-		val deadline = System.currentTimeMillis() + TIMEOUT_MS
-		var last: JsonNode? = null
-		while (System.currentTimeMillis() < deadline) {
-			last = body(get("/api/work-orders/$id", token))
-			if (last["status"].asText() == status) return last
-			Thread.sleep(100)
-		}
-		throw AssertionError("work order $id did not reach $status (last: ${last?.get("status")})")
-	}
-
-	private fun randomCpf(): String {
-		val base = (1..9).map { Random.nextInt(10) }
-		if (base.all { it == base[0] }) return randomCpf()
-		fun digit(numbers: List<Int>): Int {
-			val sum = numbers.mapIndexed { i, d -> d * (numbers.size + 1 - i) }.sum()
-			val r = sum % 11
-			return if (r < 2) 0 else 11 - r
-		}
-		val d1 = digit(base)
-		val d2 = digit(base + d1)
-		return (base + d1 + d2).joinToString("")
-	}
-
-	private fun randomPlate(): String {
-		val letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-		fun l() = letters[Random.nextInt(letters.length)]
-		fun d() = Random.nextInt(10)
-		return "${l()}${l()}${l()}${d()}${l()}${d()}${d()}"
-	}
-
-	private companion object {
-		const val BILLING_TEST_QUEUE = "test.billing.commands"
-		const val EXECUTION_TEST_QUEUE = "test.execution.commands"
-		const val DLQ = "os.events.dlq"
-		const val TIMEOUT_MS = 15_000L
 	}
 }
